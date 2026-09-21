@@ -1,145 +1,873 @@
 /* eslint-disable no-console */
-import { PrismaClient } from '@prisma/client';
+/**
+ * Seed MOCK para probar el módulo de estudiantes.
+ * Ubicación: Backend/prisma/seed-mock.ts
+ *
+ * Ejecutar (después del seed del equipo):
+ *   npx prisma db seed && npx ts-node prisma/seed-mock.ts
+ *
+ * - Reutiliza facultades, carreras, materias y Lab-1 del seed.ts del equipo
+ *   (mismos nombres/siglas), y las crea si todavía no existen.
+ * - Se puede correr varias veces: borra y recrea solo lo marcado [MOCK-EST].
+ * - Las fechas son relativas al día en que lo corras.
+ */
+import { PrismaClient, EstadoAula, EstadoExamen } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
 
-async function main() {
-  console.log('Iniciando poblado de datos (seeding)...');
+const MARCA = '[MOCK-EST]';
+const PASSWORD = 'Test1234!';
 
-  // 1. Crear Módulos
-  const modulos = ['Usuarios', 'Roles', 'Estudiantes', 'Exámenes'];
-  for (const nombre of modulos) {
-    await prisma.modulo.upsert({
-      where: { nombre },
+// Claves que ya existen en el seed.ts del equipo (se reutilizan, no se duplican)
+const MODULO = 'Estudiantes';
+const PERMISOS = {
+  VER: { clave: 'estudiantes.ver', descripcion: 'Ver listado de estudiantes' },
+  REGISTRAR: {
+    clave: 'estudiantes.registrar',
+    descripcion: 'Registrar estudiantes (manual o CSV)',
+  },
+  HABILITAR: {
+    clave: 'estudiantes.habilitar',
+    descripcion: 'Habilitar / inhabilitar estudiantes',
+  },
+} as const;
+type PermisoKey = keyof typeof PERMISOS;
+
+// Cada usuario tiene su propio rol con una combinación distinta de permisos
+const USUARIOS: {
+  correo: string;
+  nombre: string;
+  apellido: string;
+  rol: string;
+  permisos: PermisoKey[];
+}[] = [
+  {
+    correo: 'ver@sullu.test',
+    nombre: 'Vera',
+    apellido: 'SoloVer',
+    rol: 'MOCK Estudiantes - Solo ver',
+    permisos: ['VER'],
+  },
+  {
+    correo: 'registra@sullu.test',
+    nombre: 'Carlos',
+    apellido: 'Registra',
+    rol: 'MOCK Estudiantes - Ver y registrar (sin habilitar)',
+    permisos: ['VER', 'REGISTRAR'],
+  },
+  {
+    correo: 'habilita@sullu.test',
+    nombre: 'Elena',
+    apellido: 'Habilita',
+    rol: 'MOCK Estudiantes - Ver y habilitar (sin registrar)',
+    permisos: ['VER', 'HABILITAR'],
+  },
+  {
+    correo: 'completo@sullu.test',
+    nombre: 'Camila',
+    apellido: 'Completa',
+    rol: 'MOCK Estudiantes - Completo',
+    permisos: ['VER', 'REGISTRAR', 'HABILITAR'],
+  },
+  {
+    correo: 'sinacceso@sullu.test',
+    nombre: 'Nadia',
+    apellido: 'SinAcceso',
+    rol: 'MOCK Estudiantes - Sin acceso',
+    permisos: [],
+  },
+];
+
+const RESPONSABLE = 'completo@sullu.test'; // responsable de los exámenes y de los ingresos
+
+// Mismos nombres/siglas que el seed.ts del equipo
+const FACULTADES = [
+  {
+    nombre: 'Facultad de Ciencias y Tecnología (FCyT)',
+    carreras: [
+      'Ingeniería de Sistemas',
+      'Ingeniería Informática',
+      'Ingeniería Civil',
+    ],
+  },
+  {
+    nombre: 'Facultad de Ciencias Económicas (FE)',
+    carreras: ['Administración de Empresas'],
+  },
+  { nombre: 'Facultad de Humanidades', carreras: ['Psicología'] },
+];
+
+const MATERIAS = [
+  {
+    sigla: 'BD1',
+    nombre: 'Bases de Datos I',
+    carreras: ['Ingeniería de Sistemas'],
+  },
+  {
+    sigla: 'ISW',
+    nombre: 'Ingeniería de Software',
+    carreras: ['Ingeniería de Sistemas'],
+  },
+  {
+    sigla: 'INT',
+    nombre: 'Introducción a la Programación',
+    carreras: ['Ingeniería de Sistemas', 'Ingeniería Informática'],
+  },
+  {
+    sigla: 'CAL1',
+    nombre: 'Cálculo I',
+    carreras: [
+      'Ingeniería de Sistemas',
+      'Ingeniería Informática',
+      'Ingeniería Civil',
+    ],
+  },
+  {
+    sigla: 'CON1',
+    nombre: 'Contabilidad Básica',
+    carreras: ['Administración de Empresas'],
+  },
+  { sigla: 'PSG', nombre: 'Psicología General', carreras: ['Psicología'] },
+];
+
+// facultad: índice en FACULTADES
+const AMBIENTES = [
+  { nombre: 'Lab-1', capacidad: 40, tipo: 'Laboratorio', facultad: 0 },
+  { nombre: 'Aula 101', capacidad: 60, tipo: 'Aula', facultad: 0 },
+  { nombre: 'Aula 102', capacidad: 40, tipo: 'Aula', facultad: 1 },
+  { nombre: 'Aula H-1', capacidad: 50, tipo: 'Aula', facultad: 2 },
+  {
+    nombre: 'Auditorio Central',
+    capacidad: 200,
+    tipo: 'Auditorio',
+    facultad: 0,
+  },
+];
+
+// dias: relativo a hoy (negativo = ya pasó). h: [hora inicio, hora fin]. amb: índice en AMBIENTES
+const EXAMENES: {
+  dias: number;
+  sigla: string;
+  tipo: string;
+  estado: EstadoExamen;
+  h: [number, number];
+  amb: number;
+}[] = [
+  // Ya pasaron
+  {
+    dias: -150,
+    sigla: 'CAL1',
+    tipo: 'Primer parcial',
+    estado: EstadoExamen.FINALIZADO,
+    h: [8, 10],
+    amb: 1,
+  },
+  {
+    dias: -120,
+    sigla: 'INT',
+    tipo: 'Primer parcial',
+    estado: EstadoExamen.FINALIZADO,
+    h: [14, 16],
+    amb: 0,
+  },
+  {
+    dias: -75,
+    sigla: 'CON1',
+    tipo: 'Examen final',
+    estado: EstadoExamen.FINALIZADO,
+    h: [10, 12],
+    amb: 2,
+  },
+  {
+    dias: -30,
+    sigla: 'BD1',
+    tipo: 'Primer parcial',
+    estado: EstadoExamen.FINALIZADO,
+    h: [16, 18],
+    amb: 0,
+  },
+  {
+    dias: -7,
+    sigla: 'PSG',
+    tipo: 'Primer parcial',
+    estado: EstadoExamen.FINALIZADO,
+    h: [9, 11],
+    amb: 3,
+  },
+  // Hoy
+  {
+    dias: 0,
+    sigla: 'BD1',
+    tipo: 'Primer parcial',
+    estado: EstadoExamen.EN_CURSO,
+    h: [9, 11],
+    amb: 0,
+  },
+  // Próximos
+  {
+    dias: 5,
+    sigla: 'CAL1',
+    tipo: 'Examen final',
+    estado: EstadoExamen.PROGRAMADO,
+    h: [8, 10],
+    amb: 4,
+  },
+  {
+    dias: 12,
+    sigla: 'INT',
+    tipo: 'Examen final',
+    estado: EstadoExamen.PROGRAMADO,
+    h: [14, 16],
+    amb: 0,
+  },
+  {
+    dias: 20,
+    sigla: 'BD1',
+    tipo: 'Examen final',
+    estado: EstadoExamen.PROGRAMADO,
+    h: [10, 12],
+    amb: 1,
+  },
+  {
+    dias: 35,
+    sigla: 'CON1',
+    tipo: 'Segunda instancia',
+    estado: EstadoExamen.PROGRAMADO,
+    h: [16, 18],
+    amb: 2,
+  },
+  {
+    dias: 60,
+    sigla: 'PSG',
+    tipo: 'Examen final',
+    estado: EstadoExamen.PROGRAMADO,
+    h: [9, 11],
+    amb: 3,
+  },
+  {
+    dias: 85,
+    sigla: 'CAL1',
+    tipo: 'Segunda instancia',
+    estado: EstadoExamen.PROGRAMADO,
+    h: [15, 17],
+    amb: 4,
+  },
+  // Cancelado (para probar ese estado)
+  {
+    dias: 10,
+    sigla: 'CON1',
+    tipo: 'Primer parcial',
+    estado: EstadoExamen.CANCELADO,
+    h: [11, 13],
+    amb: 2,
+  },
+];
+
+const NOMBRES = [
+  'Juan',
+  'María',
+  'Luis',
+  'Ana',
+  'Carlos',
+  'Lucía',
+  'Diego',
+  'Valeria',
+  'Andrés',
+  'Camila',
+  'Pedro',
+  'Sofía',
+  'Jorge',
+  'Daniela',
+  'Miguel',
+  'Paola',
+  'Fernando',
+  'Gabriela',
+  'Ricardo',
+  'Alejandra',
+];
+const APELLIDOS = [
+  'Quispe',
+  'Mamani',
+  'Flores',
+  'Rojas',
+  'Vargas',
+  'Choque',
+  'Gutiérrez',
+  'Mendoza',
+  'Cruz',
+  'Torrico',
+  'Rivera',
+  'Salvatierra',
+  'Arce',
+  'Camacho',
+  'Suárez',
+  'Ballivián',
+];
+const MOTIVOS = [
+  'Deuda pendiente',
+  'Documentación incompleta',
+  'Suspensión académica',
+  'Materia no habilitada en su plan',
+];
+const TOTAL_ESTUDIANTES = 60;
+const INSCRITOS_POR_EXAMEN = 30;
+
+// ---------- helpers ----------
+function fechaRelativa(dias: number): Date {
+  const hoy = new Date();
+  return new Date(
+    Date.UTC(hoy.getFullYear(), hoy.getMonth(), hoy.getDate() + dias),
+  );
+}
+function hora(h: number): Date {
+  return new Date(Date.UTC(1970, 0, 1, h, 0, 0));
+}
+
+async function main() {
+  console.log('Iniciando seed mock de estudiantes...');
+
+  // 1) Limpieza de corridas anteriores (solo lo marcado como mock)
+  const viejos = await prisma.examen.findMany({
+    where: { normasEx: { startsWith: MARCA } },
+    select: { id: true },
+  });
+  const viejosIds = viejos.map((e) => e.id);
+  await prisma.ingreso.deleteMany({ where: { examenId: { in: viejosIds } } });
+  await prisma.examen.deleteMany({ where: { id: { in: viejosIds } } });
+  await prisma.reservaAmbiente.deleteMany({
+    where: { motivo: { startsWith: MARCA } },
+  });
+
+  // 2) Facultades, carreras y materias (reutiliza las del seed del equipo)
+  const facultadIds: number[] = [];
+  const carreraIds: Record<string, number> = {};
+  for (const f of FACULTADES) {
+    const facultad = await prisma.facultad.upsert({
+      where: { nombre: f.nombre },
       update: {},
-      create: { nombre },
+      create: { nombre: f.nombre },
     });
+    facultadIds.push(facultad.id);
+
+    for (const nombre of f.carreras) {
+      const existente = await prisma.carrera.findFirst({ where: { nombre } });
+      const carrera =
+        existente ??
+        (await prisma.carrera.create({
+          data: { nombre, facultadId: facultad.id },
+        }));
+      carreraIds[nombre] = carrera.id;
+    }
   }
 
-  // 2. Definir Permisos Maestros (incluyendo los .ver requeridos por el servicio)
-  const permisosBase = [
-    { clave: 'usuarios.ver', modulo: 'Usuarios' },
-    { clave: 'usuarios.crear', modulo: 'Usuarios' },
-    { clave: 'usuarios.editar', modulo: 'Usuarios' },
-    { clave: 'usuarios.desactivar', modulo: 'Usuarios' },
-    { clave: 'roles.ver', modulo: 'Roles' },
-    { clave: 'roles.crear', modulo: 'Roles' },
-    { clave: 'roles.editar', modulo: 'Roles' },
-    { clave: 'roles.eliminar', modulo: 'Roles' },
-    { clave: 'estudiantes.ver', modulo: 'Estudiantes' },
-    { clave: 'estudiantes.registrar', modulo: 'Estudiantes' },
-    { clave: 'estudiantes.habilitar', modulo: 'Estudiantes' },
-    { clave: 'examenes.ver', modulo: 'Exámenes' },
-    { clave: 'examenes.crear', modulo: 'Exámenes' },
-    { clave: 'examenes.editar', modulo: 'Exámenes' },
-    { clave: 'examenes.eliminar', modulo: 'Exámenes' },
-  ];
+  // sigla -> materia y todas las carreras donde se dicta
+  const materiaInfo: Record<
+    string,
+    { materiaId: number; carreraIds: number[] }
+  > = {};
+  for (const m of MATERIAS) {
+    const existente = await prisma.materia.findFirst({
+      where: { sigla: m.sigla },
+    });
+    const materia =
+      existente ??
+      (await prisma.materia.create({
+        data: { sigla: m.sigla, nombre: m.nombre },
+      }));
 
-  for (const p of permisosBase) {
-    await prisma.permiso.upsert({
+    for (const nombreCarrera of m.carreras) {
+      await prisma.carrera_Materia.upsert({
+        where: {
+          carreraId_materiaId: {
+            carreraId: carreraIds[nombreCarrera],
+            materiaId: materia.id,
+          },
+        },
+        update: {},
+        create: { carreraId: carreraIds[nombreCarrera], materiaId: materia.id },
+      });
+    }
+    materiaInfo[m.sigla] = {
+      materiaId: materia.id,
+      carreraIds: m.carreras.map((c) => carreraIds[c]),
+    };
+  }
+
+  // 3) Módulo, permisos, roles y usuarios
+  const modulo = await prisma.modulo.upsert({
+    where: { nombre: MODULO },
+    update: {},
+    create: { nombre: MODULO },
+  });
+
+  const permisoIds = {} as Record<PermisoKey, number>;
+  for (const key of Object.keys(PERMISOS) as PermisoKey[]) {
+    const p = PERMISOS[key];
+    const permiso = await prisma.permiso.upsert({
       where: { clave: p.clave },
       update: {},
       create: {
+        moduloId: modulo.id,
         clave: p.clave,
-        modulo: { connect: { nombre: p.modulo } },
+        descripcion: p.descripcion,
       },
+    });
+    permisoIds[key] = permiso.id;
+  }
+
+  const passwordHash = await bcrypt.hash(PASSWORD, 10);
+  const usuarioIds: Record<string, number> = {};
+
+  for (const u of USUARIOS) {
+    const rol = await prisma.rol.upsert({
+      where: { nombre: u.rol },
+      update: {},
+      create: { nombre: u.rol, descripcion: `${MARCA} Combinación de prueba` },
+    });
+
+    // Reinicia los permisos del rol para que coincidan con lo definido arriba
+    await prisma.rol_Permiso.deleteMany({ where: { rolId: rol.id } });
+    await prisma.rol_Modulo.deleteMany({ where: { rolId: rol.id } });
+    if (u.permisos.length > 0) {
+      await prisma.rol_Permiso.createMany({
+        data: u.permisos.map((k) => ({
+          rolId: rol.id,
+          permisoId: permisoIds[k],
+        })),
+        skipDuplicates: true,
+      });
+      // El módulo solo aparece para roles que tengan al menos un permiso
+      await prisma.rol_Modulo.create({
+        data: { rolId: rol.id, moduloId: modulo.id },
+      });
+    }
+
+    const usuario = await prisma.usuario.upsert({
+      where: { correo: u.correo },
+      update: { password: passwordHash },
+      create: {
+        nombre: u.nombre,
+        apellido: u.apellido,
+        correo: u.correo,
+        password: passwordHash,
+      },
+    });
+    usuarioIds[u.correo] = usuario.id;
+
+    await prisma.usuario_Rol.deleteMany({ where: { usuarioId: usuario.id } });
+    await prisma.usuario_Rol.create({
+      data: { usuarioId: usuario.id, rolId: rol.id },
+    });
+
+    // Alcance sobre todas las facultades, para que vean exámenes de cualquiera
+    await prisma.usuario_Alcance.deleteMany({
+      where: { usuarioId: usuario.id },
+    });
+    await prisma.usuario_Alcance.createMany({
+      data: facultadIds.map((facultadId) => ({
+        usuarioId: usuario.id,
+        facultadId,
+      })),
     });
   }
 
-  const todosLosPermisos = await prisma.permiso.findMany();
+  // 4) Ambientes
+  const ambienteIds: number[] = [];
+  for (const a of AMBIENTES) {
+    const tipoExistente = await prisma.tipoAula.findFirst({
+      where: { nombre: a.tipo },
+    });
+    const tipo =
+      tipoExistente ??
+      (await prisma.tipoAula.create({ data: { nombre: a.tipo } }));
 
-  // 3. Crear o actualizar Plantillas Base asegurando que sus permisos se sincronicen siempre
-  await prisma.rol.upsert({
-    where: { nombre: 'Administrador' },
-    update: {
-      esPlantilla: true,
-      permisos: {
-        deleteMany: {},
-        create: todosLosPermisos.map((p) => ({ permisoId: p.id })),
+    const existente = await prisma.ambiente.findFirst({
+      where: { nombre: a.nombre },
+    });
+    const ambiente =
+      existente ??
+      (await prisma.ambiente.create({
+        data: {
+          nombre: a.nombre,
+          capacidad: a.capacidad,
+          facultadId: facultadIds[a.facultad],
+          tipoAulaId: tipo.id,
+          estadoAulaId: 1,
+          estadoAula: EstadoAula.DISPONIBLE,
+        },
+      }));
+    ambienteIds.push(ambiente.id);
+  }
+
+  // 5) Estudiantes (con una carga CSV simulada) y sus códigos QR
+  const carga =
+    (await prisma.cargaEstudiantes.findFirst({
+      where: { archivoNombre: 'mock_estudiantes.csv' },
+    })) ??
+    (await prisma.cargaEstudiantes.create({
+      data: {
+        archivoNombre: 'mock_estudiantes.csv',
+        fechaCarga: new Date(),
+        cargadoPor: usuarioIds[RESPONSABLE],
+        cantidadRegistros: TOTAL_ESTUDIANTES,
       },
-    },
-    create: {
-      nombre: 'Administrador',
-      esPlantilla: true,
-      permisos: {
-        create: todosLosPermisos.map((p) => ({ permisoId: p.id })),
-      },
-    },
+    }));
+
+  const codigos = Array.from(
+    { length: TOTAL_ESTUDIANTES },
+    (_, i) => `2026${String(i + 1).padStart(5, '0')}`,
+  );
+  await prisma.estudiante.createMany({
+    data: codigos.map((cod, i) => ({
+      cod_sis: cod,
+      nombre: NOMBRES[i % NOMBRES.length],
+      apellido: `${APELLIDOS[i % APELLIDOS.length]} ${APELLIDOS[(i * 3 + 1) % APELLIDOS.length]}`,
+      ci: String(9000000 + i * 137),
+      cargaId: carga.id,
+    })),
+    skipDuplicates: true,
+  });
+  const estudiantes = await prisma.estudiante.findMany({
+    where: { cod_sis: { in: codigos } },
+    orderBy: { cod_sis: 'asc' },
   });
 
-  await prisma.rol.upsert({
+  await prisma.codigoQr.createMany({
+    data: estudiantes.map((e) => ({
+      estudianteId: e.id,
+      token: `QR-MOCK-${e.cod_sis}`,
+      generadoEn: new Date(),
+      expiraEn: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    })),
+    skipDuplicates: true,
+  });
+
+  // 6) Exámenes: reserva + examen + carreras/materia + inscritos (+ ingresos si ya empezó)
+  for (let k = 0; k < EXAMENES.length; k++) {
+    const e = EXAMENES[k];
+    const info = materiaInfo[e.sigla];
+
+    const reserva = await prisma.reservaAmbiente.create({
+      data: {
+        ambienteId: ambienteIds[e.amb],
+        usuarioId: usuarioIds[RESPONSABLE],
+        fecha: fechaRelativa(e.dias),
+        horaIni: hora(e.h[0]),
+        horaFin: hora(e.h[1]),
+        motivo: `${MARCA} ${e.tipo} ${e.sigla}`,
+        estadoAulaId: 1,
+      },
+    });
+
+    const examen = await prisma.examen.create({
+      data: {
+        reservaAmbienteId: reserva.id,
+        usuarioId: usuarioIds[RESPONSABLE],
+        tipoExamen: e.tipo,
+        normasEx: `${MARCA} Traer CI y celular con el QR. No se permite calculadora programable.`,
+        estado: e.estado,
+        estadoExamId: 1, // campo obligatorio en tu schema (el seed original también lo usa)
+        carrerasMaterias: {
+          create: info.carreraIds.map((carreraId) => ({
+            carreraId,
+            materiaId: info.materiaId,
+          })),
+        },
+      },
+    });
+
+    // Cada examen inscribe a 30 estudiantes distintos; 1 de cada 6 queda inhabilitado
+    const inscritos = Array.from({ length: INSCRITOS_POR_EXAMEN }, (_, j) => ({
+      est: estudiantes[(k * 7 + j) % estudiantes.length],
+      habilitado: j % 6 !== 5,
+      motivo: MOTIVOS[(k + j) % MOTIVOS.length],
+    }));
+    await prisma.examen_Estudiante.createMany({
+      data: inscritos.map((i) => ({
+        estudianteId: i.est.id,
+        examenId: examen.id,
+        estado_habilitado: i.habilitado,
+        motivo_inhabilitacion: i.habilitado ? null : i.motivo,
+      })),
+      skipDuplicates: true,
+    });
+
+    // Exámenes ya rendidos o en curso: ingresan los habilitados, salvo 1 de cada 4 (ausentes)
+    if (
+      e.estado === EstadoExamen.FINALIZADO ||
+      e.estado === EstadoExamen.EN_CURSO
+    ) {
+      const inicio = fechaRelativa(e.dias).getTime() + e.h[0] * 60 * 60 * 1000;
+      const ingresos = inscritos
+        .filter((i) => i.habilitado)
+        .filter((_, j) => j % 4 !== 3)
+        .map((i, j) => ({
+          estudianteId: i.est.id,
+          examenId: examen.id,
+          fechaHora: new Date(inicio + (5 + j) * 60 * 1000),
+          metodo: j % 5 === 4 ? 'Manual' : 'Escaneo QR',
+          registradoPor: usuarioIds[RESPONSABLE],
+        }));
+      await prisma.ingreso.createMany({ data: ingresos });
+    }
+  }
+
+  // ==========================================================
+  // SECCIÓN: DOCENTES con alcances, reservas y exámenes propios
+  // ==========================================================
+  const MARCA_DOC = '[MOCK-DOC]';
+  const passwordDocente = await bcrypt.hash(PASSWORD, 10);
+
+  // Definición de docentes a mockear
+  const DOCENTES_DEF = [
+    {
+      correo: 'maria.gomez@docente.umss.edu',
+      nombre: 'María',
+      apellido: 'Gómez',
+      alcancesSiglas: ['BD1', 'ISW'], // materias que puede ver y gestionar
+      reservasFuturas: [
+        {
+          diasDesdeHoy: 6,
+          ambIdx: 0,
+          horaIni: 8,
+          horaFin: 10,
+          motivo: `${MARCA_DOC} Parcial BD1`,
+        },
+        {
+          diasDesdeHoy: 13,
+          ambIdx: 1,
+          horaIni: 14,
+          horaFin: 16,
+          motivo: `${MARCA_DOC} Final ISW`,
+        },
+        {
+          diasDesdeHoy: 22,
+          ambIdx: 0,
+          horaIni: 8,
+          horaFin: 10,
+          motivo: `${MARCA_DOC} Segundo parcial BD1`,
+        },
+        {
+          diasDesdeHoy: 40,
+          ambIdx: 2,
+          horaIni: 16,
+          horaFin: 18,
+          motivo: `${MARCA_DOC} Final BD1`,
+        },
+      ],
+      examenes: [
+        {
+          sigla: 'BD1',
+          tipo: 'Primer parcial',
+          reservaIdx: 0,
+          estado: EstadoExamen.PROGRAMADO,
+        },
+        {
+          sigla: 'ISW',
+          tipo: 'Primer parcial',
+          reservaIdx: 1,
+          estado: EstadoExamen.PROGRAMADO,
+        },
+      ],
+    },
+    {
+      correo: 'juan.perez@docente.umss.edu',
+      nombre: 'Juan',
+      apellido: 'Pérez',
+      alcancesSiglas: ['BD1', 'ISW'],
+      reservasFuturas: [
+        {
+          diasDesdeHoy: 8,
+          ambIdx: 1,
+          horaIni: 8,
+          horaFin: 10,
+          motivo: `${MARCA_DOC} Parcial BD1`,
+        },
+        {
+          diasDesdeHoy: 30,
+          ambIdx: 0,
+          horaIni: 10,
+          horaFin: 12,
+          motivo: `${MARCA_DOC} Final ISW`,
+        },
+        {
+          diasDesdeHoy: 50,
+          ambIdx: 3,
+          horaIni: 14,
+          horaFin: 16,
+          motivo: `${MARCA_DOC} Final BD1`,
+        },
+      ],
+      examenes: [
+        {
+          sigla: 'BD1',
+          tipo: 'Segundo parcial',
+          reservaIdx: 0,
+          estado: EstadoExamen.PROGRAMADO,
+        },
+      ],
+    },
+    {
+      correo: 'carlos.ruiz@docente.umss.edu',
+      nombre: 'Carlos',
+      apellido: 'Ruiz',
+      alcancesSiglas: ['CAL1', 'INT'],
+      reservasFuturas: [
+        {
+          diasDesdeHoy: 9,
+          ambIdx: 4,
+          horaIni: 9,
+          horaFin: 11,
+          motivo: `${MARCA_DOC} Parcial CAL1`,
+        },
+        {
+          diasDesdeHoy: 28,
+          ambIdx: 1,
+          horaIni: 16,
+          horaFin: 18,
+          motivo: `${MARCA_DOC} Final INT`,
+        },
+      ],
+      examenes: [
+        {
+          sigla: 'CAL1',
+          tipo: 'Primer parcial',
+          reservaIdx: 0,
+          estado: EstadoExamen.PROGRAMADO,
+        },
+      ],
+    },
+  ];
+
+  // Limpiar reservas y exámenes doc anteriores
+  const oldDocReservas = await prisma.reservaAmbiente.findMany({
+    where: { motivo: { startsWith: MARCA_DOC } },
+    select: { id: true },
+  });
+  if (oldDocReservas.length > 0) {
+    const ids = oldDocReservas.map((r) => r.id);
+    await prisma.examen_Carrera_Materia.deleteMany({
+      where: { examen: { reservaAmbienteId: { in: ids } } },
+    });
+    await prisma.examen.deleteMany({
+      where: { reservaAmbienteId: { in: ids } },
+    });
+    await prisma.reservaAmbiente.deleteMany({ where: { id: { in: ids } } });
+  }
+
+  // Asegurar que el rol Docente exista
+  const rolDocente = await prisma.rol.upsert({
     where: { nombre: 'Docente' },
-    update: {
-      esPlantilla: true,
-      permisos: {
-        deleteMany: {},
-        create: todosLosPermisos
-          .filter(
-            (p) =>
-              p.clave.startsWith('estudiantes') ||
-              p.clave.startsWith('examenes'),
-          )
-          .map((p) => ({ permisoId: p.id })),
-      },
-    },
-    create: {
-      nombre: 'Docente',
-      esPlantilla: true,
-      permisos: {
-        create: todosLosPermisos
-          .filter(
-            (p) =>
-              p.clave.startsWith('estudiantes') ||
-              p.clave.startsWith('examenes'),
-          )
-          .map((p) => ({ permisoId: p.id })),
-      },
-    },
+    update: {},
+    create: { nombre: 'Docente', descripcion: 'Docentes del sistema' },
   });
 
-  await prisma.rol.upsert({
-    where: { nombre: 'Personal de control de ingreso' },
-    update: {
-      esPlantilla: true,
-      permisos: {
-        deleteMany: {},
-        create: todosLosPermisos
-          .filter((p) => p.clave.includes('habilitar'))
-          .map((p) => ({ permisoId: p.id })),
+  for (const d of DOCENTES_DEF) {
+    // Upsert del usuario docente
+    const docente = await prisma.usuario.upsert({
+      where: { correo: d.correo },
+      update: { password: passwordDocente },
+      create: {
+        nombre: d.nombre,
+        apellido: d.apellido,
+        correo: d.correo,
+        password: passwordDocente,
       },
-    },
-    create: {
-      nombre: 'Personal de control de ingreso',
-      esPlantilla: true,
-      permisos: {
-        create: todosLosPermisos
-          .filter((p) => p.clave.includes('habilitar'))
-          .map((p) => ({ permisoId: p.id })),
+    });
+
+    // Asignarle el rol Docente
+    await prisma.usuario_Rol.upsert({
+      where: {
+        usuarioId_rolId: { usuarioId: docente.id, rolId: rolDocente.id },
       },
-    },
-  });
+      update: {},
+      create: { usuarioId: docente.id, rolId: rolDocente.id },
+    });
 
-  // 4. Crear Usuario Administrador de prueba
-  const hashAdmin = await bcrypt.hash('admin123', 10);
-  const rolAdminObj = await prisma.rol.findUnique({
-    where: { nombre: 'Administrador' },
-  });
+    // Alcances (se resetean para que coincidan con la definición)
+    await prisma.usuario_Alcance.deleteMany({
+      where: { usuarioId: docente.id },
+    });
+    for (const sigla of d.alcancesSiglas) {
+      const info = materiaInfo[sigla];
+      if (!info) continue;
+      // Se crea un alcance por cada relación carrera-materia
+      for (const carreraId of info.carreraIds) {
+        const carrera = await prisma.carrera.findUnique({
+          where: { id: carreraId },
+          select: { facultadId: true },
+        });
+        if (!carrera) continue;
+        await prisma.usuario_Alcance.create({
+          data: {
+            usuarioId: docente.id,
+            materiaId: info.materiaId,
+            carreraId,
+            facultadId: carrera.facultadId,
+          },
+        });
+      }
+    }
 
-  await prisma.usuario.upsert({
-    where: { correo: 'admin@exacontrol.com' },
-    update: { password: hashAdmin },
-    create: {
-      nombre: 'Admin',
-      correo: 'admin@exacontrol.com',
-      password: hashAdmin,
-      roles: {
-        create: { rolId: rolAdminObj!.id },
-      },
-    },
-  });
+    // Reservas futuras
+    const reservasCreadas: number[] = [];
+    for (const r of d.reservasFuturas) {
+      const ambiente = ambienteIds[r.ambIdx] ?? ambienteIds[0];
+      const reserva = await prisma.reservaAmbiente.create({
+        data: {
+          ambienteId: ambiente,
+          usuarioId: docente.id,
+          fecha: fechaRelativa(r.diasDesdeHoy),
+          horaIni: hora(r.horaIni),
+          horaFin: hora(r.horaFin),
+          motivo: r.motivo,
+          estadoAulaId: 1,
+          estadoAula: EstadoAula.RESERVADO,
+        },
+      });
+      reservasCreadas.push(reserva.id);
+    }
 
-  console.log('Seed ejecutado satisfactoriamente.');
+    // Exámenes propios del docente (usan sus reservas)
+    for (const ex of d.examenes) {
+      const info = materiaInfo[ex.sigla];
+      if (!info) continue;
+      const reservaId = reservasCreadas[ex.reservaIdx];
+      if (!reservaId) continue;
+
+      await prisma.examen.create({
+        data: {
+          reservaAmbienteId: reservaId,
+          usuarioId: docente.id,
+          tipoExamen: ex.tipo,
+          normasEx: `${MARCA_DOC} Presentar CI vigente y QR del sistema. Celular en modo vuelo.`,
+          estado: ex.estado,
+          estadoExamId: 1,
+          carrerasMaterias: {
+            create: info.carreraIds.map((carreraId) => ({
+              carreraId,
+              materiaId: info.materiaId,
+            })),
+          },
+        },
+      });
+    }
+
+    console.log(
+      `  ✔ ${d.nombre} ${d.apellido} → alcances: ${d.alcancesSiglas.join(', ')}, reservas: ${reservasCreadas.length}, exámenes: ${d.examenes.length}`,
+    );
+  }
+
+  console.log(
+    `✔ ${EXAMENES.length} exámenes, ${estudiantes.length} estudiantes, ${USUARIOS.length} usuarios`,
+  );
+  console.log(`Contraseña de todos los usuarios de prueba: ${PASSWORD}`);
+  for (const u of USUARIOS) {
+    console.log(
+      `  ${u.correo.padEnd(24)} → ${u.permisos.join(', ') || '(sin permisos)'}`,
+    );
+  }
 }
 
 main()
