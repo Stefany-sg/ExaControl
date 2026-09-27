@@ -1,18 +1,44 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import * as nodemailer from 'nodemailer';
 
 @Injectable()
-export class MailService {
+export class MailService implements OnModuleInit {
   private transporter: nodemailer.Transporter;
   private readonly logger = new Logger(MailService.name);
 
   constructor() {
     this.transporter = nodemailer.createTransport({
-      service: 'gmail',
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: Number(process.env.SMTP_PORT) || 465,
+      secure: true, // true para puerto 465 con SSL/TLS
       auth: {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS,
       },
+      connectionTimeout: 10000, // Timeout de 10s para evitar solicitudes colgadas
+    });
+  }
+
+  // Se ejecuta al iniciar la aplicación en Render para verificar la conexión SMTP
+  onModuleInit() {
+    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+      this.logger.warn(
+        'Credenciales SMTP no configuradas en las variables de entorno.',
+      );
+      return;
+    }
+
+    this.transporter.verify((error) => {
+      if (error) {
+        this.logger.error(
+          'Error al verificar la conexión SMTP con Gmail:',
+          error,
+        );
+      } else {
+        this.logger.log(
+          'Servidor SMTP de Gmail verificado y listo para enviar correos.',
+        );
+      }
     });
   }
 
@@ -21,6 +47,8 @@ export class MailService {
     passwordTemporal: string,
     nombre: string,
   ) {
+    this.logger.log(`Iniciando intento de envío de correo a: ${correo}`);
+
     if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
       this.logger.warn(
         `Simulando envío a ${correo} (Credenciales SMTP no configuradas). Pass: ${passwordTemporal}`,
@@ -29,7 +57,7 @@ export class MailService {
     }
 
     try {
-      await this.transporter.sendMail({
+      const info = await this.transporter.sendMail({
         from: `"ExaControl UMSS" <${process.env.SMTP_USER}>`,
         to: correo,
         subject: 'Tus credenciales de acceso a ExaControl',
@@ -48,10 +76,13 @@ export class MailService {
           </div>
         `,
       });
-      this.logger.log(`Correo de credenciales enviado a: ${correo}`);
+
+      this.logger.log(
+        `Correo enviado con éxito a ${correo}. Message ID: ${info.messageId}`,
+      );
     } catch (error) {
-      this.logger.error(`Error enviando correo a ${correo}`, error);
-      // No lanzamos la excepción para no bloquear la creación del usuario en BD
+      this.logger.error(`Error enviando correo a ${correo}:`, error);
+      // No lanzamos la excepción para evitar revertir la transacción o bloquear la creación del usuario en BD
     }
   }
 }
