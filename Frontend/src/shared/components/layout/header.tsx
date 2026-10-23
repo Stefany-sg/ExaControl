@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useSession, signOut } from "next-auth/react";
+import { limpiarCacheOfflineEstudiante } from "@/features/portal/lib/offline-portal";
 import { User, LogOut } from "lucide-react";
 
 /**
@@ -20,7 +21,7 @@ interface SessionUserWithRoles {
 }
 
 function getRolDisplayName(session: SessionUserWithRoles | null | undefined): string {
-  // Si viene explícito en la sesión
+  // Si viene el nombre del rol desde el backend, usarlo directamente
   if (session?.user?.rol) {
     return String(session.user.rol).toUpperCase();
   }
@@ -28,45 +29,33 @@ function getRolDisplayName(session: SessionUserWithRoles | null | undefined): st
     return String(session.user.role).toUpperCase();
   }
 
-  // Si se dispone de la lista de permisos del usuario
-  const permisos: string[] = session?.user?.permisos || [];
-  if (
-    permisos.includes("usuarios.crear") ||
-    permisos.includes("roles.crear") ||
-    permisos.includes("usuarios.ver")
-  ) {
-    return "ADMINISTRADOR";
-  }
-  if (
-    permisos.includes("examenes.crear") ||
-    permisos.some((p) => p.startsWith("examenes"))
-  ) {
-    return "DOCENTE";
-  }
-  if (
-    permisos.includes("estudiantes.habilitar") ||
-    permisos.some((p) => p.startsWith("estudiantes"))
-  ) {
-    return "CONTROL DE INGRESO";
+  // Portal del estudiante (HU6): su sesión solo tiene el permiso portal_estudiante
+  if (session?.user?.permisos?.includes("portal_estudiante")) {
+    return "ESTUDIANTE";
   }
 
-  // Si el correo o nombre sugieren el rol
+  // Fallback: inferir del correo (solo si el backend no envió el rol)
   const email = session?.user?.email?.toLowerCase() || "";
   if (email.includes("admin")) return "ADMINISTRADOR";
-  if (email.includes("docente")) return "DOCENTE";
   if (email.includes("control")) return "CONTROL DE INGRESO";
+  if (email.includes("docente")) return "DOCENTE";
 
-  return "DOCENTE";
+  return "USUARIO";
+}
+
+interface HeaderProps {
+  /** Muestra la opción "Perfil" en el menú de usuario. El portal del estudiante la oculta. */
+  showProfile?: boolean;
 }
 
 /**
  * Header de la aplicación (cuando el usuario ya inició sesión)
  * Basado en los mockups oficiales (media_1789864393611.png y media_1789917596801.png).
  * Extremo izquierdo: LogoUMSSDarkMode.png + LogoExaControlSinNombre.png + ExaControl en rojo.
- * Extremo derecho: Sección de usuario con rol, nombre, avatar e icono desplegable
- * que abre el modal/menú flotante para "Perfil" y "Cerrar sesión" funcional.
+ * Extremo derecho: Sección de usuario con rol, nombre y avatar que abre el
+ * menú flotante para "Perfil" y "Cerrar sesión" funcional.
  */
-export function Header() {
+export function Header({ showProfile = true }: HeaderProps = {}) {
   const { data: session } = useSession();
   const router = useRouter();
 
@@ -118,35 +107,36 @@ export function Header() {
 
   const handleLogout = () => {
     setIsMenuOpen(false);
+    limpiarCacheOfflineEstudiante();
     signOut({ callbackUrl: "/login" });
   };
 
   return (
-    <header className="flex h-16 w-full items-center justify-between bg-[#002D62] px-4 md:px-6 shadow-sm border-b border-[#001f45] select-none text-white z-30">
-      {/* Extremo Superior Izquierdo: Logos Institucionales */}
-      <div className="flex items-center gap-3 sm:gap-4">
+    <header className="flex h-16 w-full items-center justify-between bg-[#002D62] px-3 md:px-6 shadow-sm border-b border-[#001f45] select-none text-white z-30">
+      {/* Extremo Superior Izquierdo: Logos Institucionales (más chicos en mobile) */}
+      <div className="flex min-w-0 items-center gap-2 sm:gap-4">
         {/* 1. Logo UMSS Dark Mode */}
         <img
           src="/LogoUMSSDarkMode.png"
           alt="Universidad Mayor de San Simón"
-          className="h-8 sm:h-9 w-auto object-contain shrink-0"
+          className="h-6 sm:h-9 w-auto object-contain shrink-0"
         />
 
         {/* 2. Logo ExaControl Sin Nombre + Nombre ExaControl en rojo pareciendo parte del logo */}
-        <div className="flex items-center gap-1.5 ml-1 sm:ml-2">
+        <div className="flex items-center gap-1 sm:gap-1.5 sm:ml-2">
           <img
             src="/LogoExaControlSinNombre.png"
             alt="ExaControl"
-            className="h-5 sm:h-6 w-auto object-contain shrink-0"
+            className="h-4 sm:h-6 w-auto object-contain shrink-0"
           />
-          <span className="text-base sm:text-lg font-black tracking-tight text-[#E30613]">
+          <span className="text-sm sm:text-lg font-black tracking-tight text-[#E30613]">
             ExaControl
           </span>
         </div>
       </div>
 
-      {/* Extremo Superior Derecho: Sección de usuario interactiva con modal/menú flotante */}
-      <div className="relative" ref={menuRef}>
+      {/* Extremo Superior Derecho: Sección de usuario interactiva con menú flotante */}
+      <div className="relative shrink-0" ref={menuRef}>
         <button
           type="button"
           onClick={() => setIsMenuOpen((prev) => !prev)}
@@ -154,8 +144,8 @@ export function Header() {
           aria-expanded={isMenuOpen}
           aria-haspopup="menu"
         >
-          {/* Píldora del Rol asignado */}
-          <span className="inline-flex items-center rounded-full bg-[#0c3b6f] px-3 py-1 text-[11px] font-semibold tracking-wider text-slate-100 border border-white/10 uppercase shadow-2xs">
+          {/* Píldora del Rol asignado: se oculta en mobile */}
+          <span className="hidden sm:inline-flex items-center rounded-full bg-[#0c3b6f] px-3 py-1 text-[11px] font-semibold tracking-wider text-slate-100 border border-white/10 uppercase shadow-2xs">
             {rol}
           </span>
 
@@ -164,35 +154,36 @@ export function Header() {
             {nombre}
           </span>
 
-          {/* Avatar Circular Rojo con Iniciales (exacto al mockup de media_1789917596801.png) */}
+          {/* Avatar Circular Rojo con Iniciales */}
           <div className="flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-full bg-[#D3101E] text-xs font-bold text-white shadow-xs ring-2 ring-[#003875]">
             {iniciales}
           </div>
-
-          {/* Icono de flecha/salida según mockup */}
-          <LogOut className="h-4 w-4 text-white/80 transition-transform group-hover:translate-x-0.5" />
         </button>
 
-        {/* Modal / Menú Flotante desplegable de Usuario */}
+        {/* Menú flotante desplegable de Usuario */}
         {isMenuOpen && (
           <div
             role="menu"
             aria-orientation="vertical"
             className="absolute right-0 top-full mt-2 z-50 w-56 rounded-2xl border border-white/15 bg-[#002D62] p-2.5 shadow-2xl animate-in fade-in zoom-in-95 duration-150"
           >
-            {/* Opción 1: Perfil */}
-            <button
-              type="button"
-              role="menuitem"
-              onClick={handleGoToProfile}
-              className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-medium text-white hover:bg-white/10 transition-colors cursor-pointer"
-            >
-              <User className="h-5 w-5 text-white" />
-              <span>Perfil</span>
-            </button>
+            {showProfile && (
+              <>
+                {/* Opción 1: Perfil */}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={handleGoToProfile}
+                  className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-medium text-white hover:bg-white/10 transition-colors cursor-pointer"
+                >
+                  <User className="h-5 w-5 text-white" />
+                  <span>Perfil</span>
+                </button>
 
-            {/* Separador sutil */}
-            <div className="my-1.5 h-px w-full bg-white/15" />
+                {/* Separador sutil */}
+                <div className="my-1.5 h-px w-full bg-white/15" />
+              </>
+            )}
 
             {/* Opción 2: Cerrar sesión (Color rojo coral según mockup) */}
             <button
