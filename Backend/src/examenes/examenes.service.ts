@@ -3,16 +3,23 @@ import {
   BadRequestException,
   ForbiddenException,
   NotFoundException,
+  ConflictException,
 } from '@nestjs/common';
-import { PrismaClient, EstadoExamen, Prisma } from '@prisma/client';
+import {
+  EstadoExamen,
+  EstadoReserva,
+  EstadoAula,
+  Prisma,
+} from '@prisma/client';
+import { fechasPermitidas } from '../ambientes/ambientes.service';
 import { CreateExamenDto } from './dto/create-examen.dto';
 import { UpdateExamenDto } from './dto/update-examen.dto';
 import { QueryExamenDto } from './dto/query-examen.dto';
 
-const prisma = new PrismaClient();
+import { PrismaService } from '../prisma/prisma.service';
 
 const EXAMEN_INCLUDE = {
-  reservaAmbiente: { include: { ambiente: true } },
+  reservaAmbiente: { include: { horarioFijo: true, ambiente: true } },
   carrerasMaterias: {
     include: {
       carrera_materia: {
@@ -54,6 +61,7 @@ const horaISO = (d?: Date | null, defecto = '') =>
 
 @Injectable()
 export class ExamenesService {
+  constructor(private readonly prisma: PrismaService) {}
   getTiposExamen() {
     return [
       'Primer Parcial',
@@ -82,8 +90,8 @@ export class ExamenesService {
         e.reservaAmbiente?.ambiente?.id ?? e.reservaAmbiente?.ambienteId ?? 0,
       ambienteNombre: e.reservaAmbiente?.ambiente?.nombre ?? 'Aula asignada',
       fecha: fechaISO(e.reservaAmbiente?.fecha),
-      horaInicio: horaISO(e.reservaAmbiente?.horaIni, '08:00'),
-      horaFin: horaISO(e.reservaAmbiente?.horaFin, '09:30'),
+      horaInicio: horaISO(e.reservaAmbiente?.horarioFijo?.horaIni, '08:00'),
+      horaFin: horaISO(e.reservaAmbiente?.horarioFijo?.horaFin, '09:30'),
       fueEditado: Boolean(e.fueEditado),
       // Alias para que el frontend use siempre "createdAt"
       createdAt: e.creadoEn?.toISOString() ?? new Date().toISOString(),
@@ -94,13 +102,14 @@ export class ExamenesService {
 
   // --- OBTENER EXÁMENES PÚBLICOS PARA EL CALENDARIO Y PÁGINA DE BIENVENIDA ---
   async getExamenesPublicos() {
-    const examenes = await prisma.examen.findMany({
+    const examenes = await this.prisma.examen.findMany({
       where: {
         estado: { not: EstadoExamen.CANCELADO },
       },
       include: {
         reservaAmbiente: {
           include: {
+            horarioFijo: true,
             ambiente: {
               include: {
                 facultad: true,
@@ -133,7 +142,7 @@ export class ExamenesService {
       },
       orderBy: [
         { reservaAmbiente: { fecha: 'asc' } },
-        { reservaAmbiente: { horaIni: 'asc' } },
+        { reservaAmbiente: { horarioFijo: { horaIni: 'asc' } } },
       ],
     });
 
@@ -165,8 +174,8 @@ export class ExamenesService {
         ambienteId: e.reservaAmbiente?.ambiente?.id ?? 0,
         ambienteNombre: e.reservaAmbiente?.ambiente?.nombre ?? 'Aula asignada',
         fecha: fechaISO(e.reservaAmbiente?.fecha),
-        horaInicio: horaISO(e.reservaAmbiente?.horaIni, '08:00'),
-        horaFin: horaISO(e.reservaAmbiente?.horaFin, '09:30'),
+        horaInicio: horaISO(e.reservaAmbiente?.horarioFijo?.horaIni, '08:00'),
+        horaFin: horaISO(e.reservaAmbiente?.horarioFijo?.horaFin, '09:30'),
         estado: e.estado,
       };
     });
@@ -181,7 +190,7 @@ export class ExamenesService {
 
     // Admin: devuelve todas las materias sin filtrar por alcance
     if (isAdmin) {
-      const carrerasMaterias = await prisma.carrera_Materia.findMany({
+      const carrerasMaterias = await this.prisma.carrera_Materia.findMany({
         include: {
           materia: true,
           carrera: { include: { facultad: true } },
@@ -203,7 +212,7 @@ export class ExamenesService {
       return Array.from(uniqueMateriasMap.values());
     }
 
-    const alcances = await prisma.usuario_Alcance.findMany({
+    const alcances = await this.prisma.usuario_Alcance.findMany({
       where: { usuarioId: id },
       select: { materiaId: true, carreraId: true, facultadId: true },
     });
@@ -234,7 +243,7 @@ export class ExamenesService {
       return [];
     }
 
-    const carrerasMaterias = await prisma.carrera_Materia.findMany({
+    const carrerasMaterias = await this.prisma.carrera_Materia.findMany({
       where: {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         OR: [
@@ -270,16 +279,17 @@ export class ExamenesService {
   // Ambientes que el docente tiene reservados: es lo único que ve en el form de aula.
   // Se devuelve una fila por reserva (un mismo ambiente puede tener varias reservas).
   async getMisAmbientes(usuarioId: number, isAdmin = false) {
-    const hoy = new Date();
-    hoy.setHours(0, 0, 0, 0);
+    const hoy = new Date(`${fechasPermitidas().fechaMin}T00:00:00Z`);
 
-    const reservas = await prisma.reservaAmbiente.findMany({
+    const reservas = await this.prisma.reservaAmbiente.findMany({
       where: {
-        ...(isAdmin ? {} : { usuarioId }), // admin ve todas; docente solo las suyas
+        docenteId: usuarioId,
+        estado: EstadoReserva.RESERVADO,
+        ambiente: { estadoAula: EstadoAula.DISPONIBLE },
         fecha: { gte: hoy },
         examenes: { none: {} },
       },
-      include: { ambiente: true },
+      include: { horarioFijo: true, ambiente: true },
       orderBy: { fecha: 'asc' },
     });
 
@@ -288,8 +298,8 @@ export class ExamenesService {
       ambienteId: r.ambienteId,
       ambienteNombre: r.ambiente?.nombre ?? '',
       fecha: fechaISO(r.fecha),
-      horaInicio: horaISO(r.horaIni),
-      horaFin: horaISO(r.horaFin),
+      horaInicio: horaISO(r.horarioFijo?.horaIni),
+      horaFin: horaISO(r.horarioFijo?.horaFin),
     }));
   }
 
@@ -305,7 +315,7 @@ export class ExamenesService {
       isAdmin,
     );
 
-    const carreraMateria = await prisma.carrera_Materia.findFirst({
+    const carreraMateria = await this.prisma.carrera_Materia.findFirst({
       where: { materiaId: materiaIdNum },
       include: { carrera: true },
     });
@@ -325,9 +335,9 @@ export class ExamenesService {
           ? legacyNormas
           : null;
 
-    const nuevoExamen = await prisma.$transaction(async (tx) => {
-      // Ya no se crea una reserva placeholder: el examen se cuelga de una reserva
-      // real del docente, y varios exámenes pueden compartir la misma.
+    const nuevoExamen = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM ambientes WHERE id = ${reserva.ambienteId} FOR UPDATE`;
+      await this.validarReservaVigente(tx, reserva.id, usuarioId);
       const examen = await tx.examen.create({
         data: {
           reservaAmbienteId: reserva.id,
@@ -350,7 +360,7 @@ export class ExamenesService {
       return examen;
     });
 
-    const examenGuardado = await prisma.examen.findUnique({
+    const examenGuardado = await this.prisma.examen.findUnique({
       where: { id: nuevoExamen.id },
       include: EXAMEN_INCLUDE,
     });
@@ -363,7 +373,7 @@ export class ExamenesService {
   private async condicionesAlcance(
     usuarioId: number,
   ): Promise<Prisma.Examen_Carrera_MateriaWhereInput[]> {
-    const alcances = await prisma.usuario_Alcance.findMany({
+    const alcances = await this.prisma.usuario_Alcance.findMany({
       where: { usuarioId },
       select: { materiaId: true, carreraId: true, facultadId: true },
     });
@@ -470,7 +480,7 @@ export class ExamenesService {
       };
     }
 
-    const examenes = await prisma.examen.findMany({
+    const examenes = await this.prisma.examen.findMany({
       where: whereClause,
       include: EXAMEN_INCLUDE,
       orderBy: { creadoEn: 'desc' },
@@ -480,12 +490,16 @@ export class ExamenesService {
   }
 
   async update(id: number, dto: UpdateExamenDto, usuarioId: number) {
-    const examenActual = await prisma.examen.findUnique({
+    const examenActual = await this.prisma.examen.findUnique({
       where: { id },
       include: { carrerasMaterias: true },
     });
 
     if (!examenActual) throw new NotFoundException('Examen no localizado.');
+    if (examenActual.usuarioId !== usuarioId)
+      throw new ForbiddenException(
+        'El examen no pertenece al usuario autenticado.',
+      );
 
     const materiaIdNum = dto.materiaId ? Number(dto.materiaId) : undefined;
 
@@ -495,23 +509,16 @@ export class ExamenesService {
     ) {
       await this.validarAlcanceMateria(usuarioId, materiaIdNum);
 
-      const carreraMateria = await prisma.carrera_Materia.findFirst({
+      const carreraMateria = await this.prisma.carrera_Materia.findFirst({
         where: { materiaId: materiaIdNum },
       });
 
-      if (carreraMateria) {
-        await prisma.examen_Carrera_Materia.updateMany({
-          where: { examenId: id },
-          data: {
-            materiaId: materiaIdNum,
-            carreraId: carreraMateria.carreraId,
-          },
-        });
-      }
+      if (!carreraMateria)
+        throw new BadRequestException('Materia sin carrera válida.');
     }
 
     // Cambiar de aula = apuntar el examen a OTRA reserva del docente.
-    // Nunca se modifica la reserva en sí: puede estar compartida con otros exámenes.
+    // La reserva permanece intacta; solo cambia la asociación del examen.
     let nuevaReservaId: number | undefined;
     if (dto.reservaAmbienteId || dto.ambienteId) {
       const reserva = await this.resolverReservaDelDocente(usuarioId, dto);
@@ -521,24 +528,69 @@ export class ExamenesService {
     const dtoLegacy = dto as UpdateExamenDto & { normas?: string | null };
     const normasNuevas = dto.normasEx ?? dtoLegacy.normas;
 
-    const examenActualizado = await prisma.examen.update({
-      where: { id },
-      data: {
-        tipoExamen: dto.tipoExamen,
-        // undefined = no tocar (antes un PATCH sin normas las borraba)
-        normasEx: normasNuevas,
-        reservaAmbienteId: nuevaReservaId,
-        fueEditado: true,
-      },
-      include: EXAMEN_INCLUDE,
+    const examenActualizado = await this.prisma.$transaction(async (tx) => {
+      const reservas = await tx.reservaAmbiente.findMany({
+        where: {
+          id: {
+            in: [
+              examenActual.reservaAmbienteId,
+              ...(nuevaReservaId ? [nuevaReservaId] : []),
+            ],
+          },
+        },
+      });
+      for (const ambienteId of [
+        ...new Set(reservas.map((r) => r.ambienteId)),
+      ].sort((a, b) => a - b)) {
+        await tx.$queryRaw`SELECT id FROM ambientes WHERE id = ${ambienteId} FOR UPDATE`;
+      }
+      const actual = await tx.examen.findUnique({ where: { id } });
+      if (
+        !actual ||
+        actual.usuarioId !== usuarioId ||
+        actual.reservaAmbienteId !== examenActual.reservaAmbienteId
+      )
+        throw new ConflictException(
+          'El examen cambió. Actualiza la información.',
+        );
+      if (nuevaReservaId)
+        await this.validarReservaVigente(tx, nuevaReservaId, usuarioId, id);
+      if (
+        materiaIdNum &&
+        materiaIdNum !== examenActual.carrerasMaterias[0]?.materiaId
+      ) {
+        const cm = await tx.carrera_Materia.findFirst({
+          where: { materiaId: materiaIdNum },
+        });
+        if (!cm) throw new BadRequestException('Materia sin carrera válida.');
+        await tx.examen_Carrera_Materia.updateMany({
+          where: { examenId: id },
+          data: { materiaId: materiaIdNum, carreraId: cm.carreraId },
+        });
+      }
+      return tx.examen.update({
+        where: { id },
+        data: {
+          tipoExamen: dto.tipoExamen,
+          // undefined = no tocar (antes un PATCH sin normas las borraba)
+          normasEx: normasNuevas,
+          reservaAmbienteId: nuevaReservaId,
+          fueEditado: true,
+        },
+        include: EXAMEN_INCLUDE,
+      });
     });
 
     return this.formatExamenResponse(examenActualizado);
   }
 
-  async remove(id: number) {
-    const examen = await prisma.examen.findUnique({ where: { id } });
+  async remove(id: number, usuarioId: number) {
+    const examen = await this.prisma.examen.findUnique({ where: { id } });
     if (!examen) throw new NotFoundException('Examen no localizado.');
+    if (examen.usuarioId !== usuarioId)
+      throw new ForbiddenException(
+        'El examen no pertenece al usuario autenticado.',
+      );
 
     if (
       examen.estado === EstadoExamen.EN_CURSO ||
@@ -553,13 +605,13 @@ export class ExamenesService {
       (new Date().getTime() - examen.creadoEn.getTime()) / (1000 * 60 * 60);
 
     if (horasTranscurridas < 24) {
-      await prisma.ingreso
+      await this.prisma.ingreso
         .deleteMany({ where: { examenId: id } })
         .catch(() => null);
-      await prisma.examen_Carrera_Materia.deleteMany({
+      await this.prisma.examen_Carrera_Materia.deleteMany({
         where: { examenId: id },
       });
-      await prisma.examen.delete({ where: { id } });
+      await this.prisma.examen.delete({ where: { id } });
       // OJO: ya NO se borra la reserva. Es del docente y otros exámenes pueden usarla.
       return {
         message:
@@ -567,7 +619,7 @@ export class ExamenesService {
         success: true,
       };
     } else {
-      await prisma.examen.update({
+      await this.prisma.examen.update({
         where: { id },
         data: { estado: EstadoExamen.CANCELADO },
       });
@@ -604,7 +656,7 @@ export class ExamenesService {
     const ambienteId = ref.ambienteId ? Number(ref.ambienteId) : undefined;
 
     if (reservaId) {
-      const reserva = await prisma.reservaAmbiente.findUnique({
+      const reserva = await this.prisma.reservaAmbiente.findUnique({
         where: { id: reservaId },
       });
       if (!reserva) {
@@ -613,7 +665,7 @@ export class ExamenesService {
         );
       }
       // Admin puede usar cualquier reserva; docente solo las propias
-      if (!isAdmin && reserva.usuarioId !== usuarioId) {
+      if (reserva.docenteId !== usuarioId) {
         throw new ForbiddenException(
           'El ambiente seleccionado no está entre tus reservas.',
         );
@@ -622,8 +674,14 @@ export class ExamenesService {
     }
 
     if (ambienteId) {
-      const where = isAdmin ? { ambienteId } : { usuarioId, ambienteId };
-      const reservas = await prisma.reservaAmbiente.findMany({
+      const where = {
+        docenteId: usuarioId,
+        ambienteId,
+        estado: EstadoReserva.RESERVADO,
+        fecha: { gte: new Date(`${fechasPermitidas().fechaMin}T00:00:00Z`) },
+        examenes: { none: {} },
+      };
+      const reservas = await this.prisma.reservaAmbiente.findMany({
         where,
         take: 2,
       });
@@ -643,5 +701,30 @@ export class ExamenesService {
     throw new BadRequestException(
       'Debes seleccionar uno de tus ambientes reservados.',
     );
+  }
+  private async validarReservaVigente(
+    tx: Prisma.TransactionClient,
+    id: number,
+    usuarioId: number,
+    examenId?: number,
+  ) {
+    const reserva = await tx.reservaAmbiente.findUnique({
+      where: { id },
+      include: { ambiente: true, examenes: true },
+    });
+    if (!reserva || reserva.docenteId !== usuarioId)
+      throw new ForbiddenException(
+        'La reserva no pertenece al usuario autenticado.',
+      );
+    if (
+      reserva.estado !== EstadoReserva.RESERVADO ||
+      reserva.ambiente.estadoAula !== EstadoAula.DISPONIBLE ||
+      reserva.fecha.toISOString().slice(0, 10) < fechasPermitidas().fechaMin
+    )
+      throw new ConflictException(
+        'La reserva no está vigente o el ambiente no está habilitado.',
+      );
+    if (reserva.examenes.some((e) => e.id !== examenId))
+      throw new ConflictException('La reserva ya tiene un examen asociado.');
   }
 }
